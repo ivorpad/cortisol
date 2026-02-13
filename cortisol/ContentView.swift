@@ -1,59 +1,57 @@
-//
-//  ContentView.swift
-//  cortisol
-//
-//  Created by Ivor Padilla on 13/2/26.
-//
-
 import SwiftUI
-import SwiftData
+import AppKit
 
-struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+struct CortisolMenu: View {
+    var manager: SleepManager
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
-                }
-                .onDelete(perform: deleteItems)
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
-        } detail: {
-            Text("Select an item")
+        if manager.isAwake {
+            Text("Awake")
+        } else {
+            Text("Sleep Enabled")
         }
-    }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
+        if let time = manager.formattedTime {
+            Text("\(time) remaining")
         }
-    }
 
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+        Divider()
+
+        if manager.isAwake {
+            Button("Allow Sleep") {
+                manager.disableAwake()
+            }
+        } else {
+            Button("Keep Awake") {
+                manager.enableAwake()
+            }
+
+            Menu("Keep Awake For...") {
+                Button("1 Hour") { manager.enableAwake(duration: 3600) }
+                Button("2 Hours") { manager.enableAwake(duration: 7200) }
+                Button("4 Hours") { manager.enableAwake(duration: 14400) }
+                Button("8 Hours") { manager.enableAwake(duration: 28800) }
             }
         }
-    }
-}
 
-#Preview {
-    ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        Divider()
+
+        Text(manager.powerSource)
+
+        if manager.activeInterfaces.isEmpty {
+            Text("No Network")
+        } else {
+            ForEach(manager.activeInterfaces, id: \.self) { iface in
+                Text(iface)
+            }
+        }
+
+        Divider()
+
+        Button("Quit Cortisol") {
+            manager.cleanup()
+            NSApplication.shared.terminate(nil)
+        }
+        .keyboardShortcut("q")
+    }
 }

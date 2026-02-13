@@ -1,32 +1,22 @@
-//
-//  cortisolApp.swift
-//  cortisol
-//
-//  Created by Ivor Padilla on 13/2/26.
-//
-
 import SwiftUI
-import SwiftData
+import AppKit
 
 @main
 struct cortisolApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @State private var manager = SleepManager()
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            CortisolMenu(manager: manager)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: manager.menuBarIcon)
+                if let time = manager.compactTime {
+                    Text(time)
+                        .monospacedDigit()
+                }
+            }
         }
-        .modelContainer(sharedModelContainer)
+        .menuBarExtraStyle(.menu)
     }
 }
