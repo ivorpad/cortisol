@@ -4,7 +4,7 @@ A macOS menu bar app that prevents your Mac from sleeping — even when you clos
 
 **[Download the latest release](https://github.com/ivorpad/cortisol/releases/latest)**
 
-![Cortisol menu](screenshot.jpg)
+![Cortisol menu](screenshot.png)
 
 ## Features
 
