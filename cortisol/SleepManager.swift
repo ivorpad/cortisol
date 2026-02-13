@@ -11,7 +11,10 @@ final class SleepManager {
     var remainingSeconds: Int?
     var powerSource = "Unknown"
     var activeInterfaces: [String] = []
+    var displaySleepMinutes: Int = 10
     var needsSetup: Bool { !sudoersInstalled }
+
+    static let displaySleepOptions = [1, 2, 5, 10, 30, 0]
 
     // MARK: - Timers
 
@@ -109,6 +112,27 @@ final class SleepManager {
         refreshStatus()
     }
 
+    func setDisplaySleep(minutes: Int) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        process.arguments = ["-n", "/usr/bin/pmset", "-a", "displaysleep", "\(minutes)"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                displaySleepMinutes = minutes
+            }
+        } catch {}
+    }
+
+    static func displaySleepLabel(for minutes: Int) -> String {
+        if minutes == 0 { return "Never" }
+        if minutes == 1 { return "1 Minute" }
+        return "\(minutes) Minutes"
+    }
+
     func refreshStatus() {
         if let output = shell("/usr/bin/pmset", ["-g"]) {
             let wasAwake = isAwake
@@ -121,6 +145,12 @@ final class SleepManager {
                 countdownTimer?.invalidate()
                 countdownTimer = nil
                 remainingSeconds = nil
+            }
+
+            if let range = output.range(of: #"displaysleep\s+(\d+)"#, options: .regularExpression) {
+                let match = output[range]
+                let digits = match.split(separator: " ").last.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                if let d = digits { displaySleepMinutes = d }
             }
         }
 
@@ -152,8 +182,11 @@ final class SleepManager {
 
     // MARK: - Sudoers Setup (one-time, with Touch ID)
 
+    private static let sudoersVersion = "v2"
+
     private var sudoersInstalled: Bool {
-        FileManager.default.fileExists(atPath: Self.sudoersPath)
+        guard FileManager.default.fileExists(atPath: Self.sudoersPath) else { return false }
+        return UserDefaults.standard.string(forKey: "sudoersVersion") == Self.sudoersVersion
     }
 
     /// One-time admin prompt (supports Touch ID). Installs a sudoers entry so
@@ -163,11 +196,14 @@ final class SleepManager {
         if sudoersInstalled { return true }
 
         let username = NSUserName()
-        let sudoersContent = [
-            "# Cortisol - passwordless pmset for sleep control",
+        let displaySleepEntries = Self.displaySleepOptions.map {
+            "\(username) ALL=(ALL) NOPASSWD: /usr/bin/pmset -a displaysleep \($0)"
+        }
+        let sudoersContent = ([
+            "# Cortisol \(Self.sudoersVersion) - passwordless pmset for sleep control",
             "\(username) ALL=(ALL) NOPASSWD: /usr/bin/pmset -a disablesleep 0",
             "\(username) ALL=(ALL) NOPASSWD: /usr/bin/pmset -a disablesleep 1",
-        ].joined(separator: "\n")
+        ] + displaySleepEntries).joined(separator: "\n")
 
         // Write to temp, validate with visudo, then move into place
         let commands = [
@@ -182,7 +218,11 @@ final class SleepManager {
         guard let script = NSAppleScript(source: source) else { return false }
         var error: NSDictionary?
         script.executeAndReturnError(&error)
-        return error == nil
+        if error == nil {
+            UserDefaults.standard.set(Self.sudoersVersion, forKey: "sudoersVersion")
+            return true
+        }
+        return false
     }
 
     // MARK: - Privileged Execution

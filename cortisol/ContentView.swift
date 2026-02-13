@@ -34,6 +34,21 @@ struct CortisolMenu: View {
             }
         }
 
+        Menu("Turn Off Display After...") {
+            ForEach(SleepManager.displaySleepOptions, id: \.self) { minutes in
+                Button {
+                    manager.setDisplaySleep(minutes: minutes)
+                } label: {
+                    let label = SleepManager.displaySleepLabel(for: minutes)
+                    if manager.displaySleepMinutes == minutes {
+                        Text("\(label) ✓")
+                    } else {
+                        Text(label)
+                    }
+                }
+            }
+        }
+
         Divider()
 
         Text(manager.powerSource)
