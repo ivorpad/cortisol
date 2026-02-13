@@ -1,101 +1,98 @@
 # Cortisol
 
-A macOS menu bar app that prevents your Mac from sleeping. Lives in the menu bar, toggles sleep on and off, and shows power source and network info at a glance.
+A macOS menu bar app that prevents your Mac from sleeping — even when you close the lid. One click to keep awake, one click to restore. Shows power source and network info at a glance.
 
-## Usage
+**[Download the latest release](https://github.com/ivorpad/cortisol/releases/latest)**
 
-Cortisol sits in the menu bar with a bolt icon.
+<!-- Screenshot placeholder: add screenshot.png to repo root -->
+<!-- ![Cortisol menu](screenshot.png) -->
 
-- **bolt.fill** — sleep is disabled (your Mac is being kept awake)
-- **bolt.slash** — sleep is enabled (normal behavior)
+## Features
 
-Click the icon to open the menu:
+- **Keep Awake** indefinitely or for 1, 2, 4, or 8 hours with a countdown timer in the menu bar
+- **Power source** display (AC or battery percentage)
+- **Network info** showing active interfaces with IP addresses (Wi-Fi, Ethernet, VPN)
+- **Watchdog** safety net — if Cortisol is force-quit or crashes while keeping your Mac awake, a background agent restores normal sleep within 2 minutes
+- **One-time setup** — authenticates once via Touch ID or password, then runs silently forever
 
-- **Keep Awake** — disable sleep indefinitely
-- **Keep Awake For...** — disable sleep for 1, 2, 4, or 8 hours (countdown shown in menu bar)
-- **Allow Sleep** — re-enable normal sleep behavior
-- **Quit Cortisol** — re-enables sleep and exits
+## How it works
 
-The menu also shows your current power source (AC or battery percentage) and active network interfaces with their IP addresses.
+Cortisol lives in the menu bar with a bolt icon:
+
+| Icon | State |
+|---|---|
+| ⚡ (filled) | Sleep is disabled — your Mac stays awake |
+| ⚡ (slashed) | Normal behavior — sleep is enabled |
+
+Click the icon to toggle sleep, set a timed session, or view system info. When a timer is active, the remaining time appears next to the icon in the menu bar.
+
+Cortisol uses `pmset -a disablesleep` under the hood — the only macOS API that truly prevents sleep when the lid is closed. Alternatives like `caffeinate` only prevent idle sleep.
 
 ## First Launch
 
-On first launch, Cortisol asks for administrator privileges (via the standard macOS auth dialog, which supports Touch ID). This installs a sudoers entry so all future sleep toggling is passwordless — you only authenticate once.
+On first launch, Cortisol asks for administrator privileges via the standard macOS auth dialog (supports Touch ID). This installs a scoped sudoers entry so all future sleep toggling is passwordless — you only authenticate once.
 
 ## The Watchdog
 
-Cortisol installs a LaunchAgent (`io.gradion.cortisol.watchdog`) that acts as a safety net. It exists to handle one scenario: **Cortisol is killed or crashes while sleep is disabled.**
+Cortisol installs a LaunchAgent (`io.gradion.cortisol.watchdog`) that acts as a safety net for one scenario: **Cortisol is killed or crashes while sleep is disabled.**
 
-Without the watchdog, force-quitting or crashing while awake would leave your Mac permanently unable to sleep until you manually run `sudo pmset -a disablesleep 0`.
+Without it, force-quitting while awake would leave your Mac permanently unable to sleep until you manually run `sudo pmset -a disablesleep 0`.
 
 ### How it works
 
-The watchdog is a launchd job that runs every **120 seconds**. It executes a shell script that follows this logic:
+The watchdog runs every **120 seconds** via launchd:
 
-1. **Check marker file** (`/tmp/cortisol-awake`) — if it doesn't exist, sleep was never forced, so exit immediately. This means the watchdog is essentially free when Cortisol isn't keeping the Mac awake.
-2. **Check if Cortisol is running** (`pgrep -x cortisol`) — if yes, the app is alive and managing things, so exit.
-3. **Check if sleep is actually disabled** (`pmset -g | grep SleepDisabled.*1`) — if sleep isn't disabled, clean up the marker file and exit.
-4. **Cortisol is dead and sleep is stuck disabled.** Try passwordless sudo (`sudo -n pmset -a disablesleep 0`) to silently fix it.
-5. **If passwordless sudo fails** (sudoers not installed), show a macOS dialog: *"Cortisol was terminated but your Mac is still prevented from sleeping."* with a **Restore Sleep** button that prompts for admin credentials.
-6. **Clean up** the marker file.
+1. **Check marker file** (`/tmp/cortisol-awake`) — if absent, exit immediately. Zero cost when Cortisol isn't keeping the Mac awake.
+2. **Check if Cortisol is running** — if yes, exit.
+3. **Check if sleep is disabled** — if not, clean up and exit.
+4. **Cortisol is dead and sleep is stuck.** Try passwordless sudo to silently restore sleep.
+5. **If passwordless sudo fails**, show a macOS dialog with a **Restore Sleep** button that prompts for admin credentials.
 
-### Files
+### Normal quit vs force quit
 
-| File | Purpose |
-|---|---|
-| `/tmp/cortisol-awake` | Marker file. Created when sleep is disabled, removed when re-enabled. The watchdog uses this to know whether it needs to act. |
-| `~/Library/LaunchAgents/io.gradion.cortisol.watchdog.plist` | The LaunchAgent plist. Written and loaded by Cortisol on every launch. Runs the watchdog script every 120 seconds. |
-
-### Normal quit vs kill
-
-- **Quit from menu** — Cortisol calls `cleanup()`, which re-enables sleep, removes the marker, and the watchdog has nothing to do.
-- **Force quit / crash / `kill -9`** — The marker file persists, the watchdog detects Cortisol is gone within 120 seconds, and restores sleep automatically.
+- **Quit from menu** — Cortisol re-enables sleep, removes the marker. The watchdog has nothing to do.
+- **Force quit / crash / `kill -9`** — The marker persists. The watchdog detects Cortisol is gone and restores sleep automatically.
 
 ## Security
 
 ### Sudoers entry
 
-Cortisol installs a file at `/etc/sudoers.d/cortisol` that grants your user passwordless sudo for exactly two commands:
+Cortisol installs `/etc/sudoers.d/cortisol` granting passwordless sudo for exactly two commands:
 
 ```
 <username> ALL=(ALL) NOPASSWD: /usr/bin/pmset -a disablesleep 0
 <username> ALL=(ALL) NOPASSWD: /usr/bin/pmset -a disablesleep 1
 ```
 
-This is scoped as tightly as possible — it only permits toggling the `disablesleep` flag via `pmset`, nothing else.
+Scoped as tightly as possible — only the `disablesleep` flag, nothing else.
 
-### Installation process
+### Why sudo?
 
-1. The sudoers content is written to `/tmp/cortisol-sudoers`.
-2. Validated with `visudo -cf` (catches syntax errors before they can lock you out of sudo).
-3. Moved to `/etc/sudoers.d/cortisol`.
-4. Permissions set to `440`, owned by `root:wheel` — the standard for sudoers fragments.
+`pmset -a disablesleep` requires root. There's no unprivileged API for this on macOS. The alternatives are worse:
 
-The entire sequence runs inside `osascript "do shell script ... with administrator privileges"`, which triggers the macOS authentication dialog (supports Touch ID if configured). This only happens once.
-
-### Why sudo at all?
-
-`pmset -a disablesleep` requires root. There's no unprivileged API for this on macOS. The alternatives are:
-
-- Prompting for admin credentials every time (bad UX)
-- Running the whole app as root (much worse security posture)
-- Using `caffeinate` (doesn't actually disable sleep, only prevents idle sleep — closing the lid still sleeps)
-
-The sudoers approach is the least-privilege option.
+- Prompting for credentials every time (bad UX)
+- Running the whole app as root (bad security)
+- Using `caffeinate` (doesn't prevent lid-close sleep)
 
 ### What to audit
 
-- `/etc/sudoers.d/cortisol` — the only persistent system-level change. Remove it to fully uninstall Cortisol's privileges.
-- `~/Library/LaunchAgents/io.gradion.cortisol.watchdog.plist` — the LaunchAgent. Remove it to stop the watchdog.
-- `/tmp/cortisol-awake` — ephemeral marker, cleared on reboot.
+| File | Purpose |
+|---|---|
+| `/etc/sudoers.d/cortisol` | Only persistent system change. Remove to revoke privileges. |
+| `~/Library/LaunchAgents/io.gradion.cortisol.watchdog.plist` | Watchdog LaunchAgent. Remove to stop it. |
+| `/tmp/cortisol-awake` | Ephemeral marker. Cleared on reboot. |
 
 ## Uninstall
 
-1. Quit Cortisol.
-2. `launchctl unload ~/Library/LaunchAgents/io.gradion.cortisol.watchdog.plist`
-3. `rm ~/Library/LaunchAgents/io.gradion.cortisol.watchdog.plist`
-4. `sudo rm /etc/sudoers.d/cortisol`
-5. Delete the app.
+```bash
+# 1. Quit Cortisol from the menu bar
+# 2. Remove the watchdog
+launchctl unload ~/Library/LaunchAgents/io.gradion.cortisol.watchdog.plist
+rm ~/Library/LaunchAgents/io.gradion.cortisol.watchdog.plist
+# 3. Remove the sudoers entry
+sudo rm /etc/sudoers.d/cortisol
+# 4. Delete the app
+```
 
 ## Build
 
