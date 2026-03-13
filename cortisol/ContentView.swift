@@ -64,8 +64,7 @@ struct CortisolMenu: View {
         Divider()
 
         Button("Quit Cortisol") {
-            manager.cleanup()
-            NSApplication.shared.terminate(nil)
+            manager.userQuit()
         }
         .keyboardShortcut("q")
     }

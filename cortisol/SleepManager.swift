@@ -13,8 +13,15 @@ final class SleepManager {
     var activeInterfaces: [String] = []
     var displaySleepMinutes: Int = 10
     var needsSetup: Bool { !sudoersInstalled }
+    private var userInitiatedQuit = false
+    private var didCleanup = false
 
     static let displaySleepOptions = [1, 2, 5, 10, 30, 0]
+
+    // MARK: - Persistence Keys
+
+    private static let persistedAwakeKey = "cortisolAwakeState"
+    private static let persistedExpirationKey = "cortisolAwakeExpiration"
 
     // MARK: - Timers
 
@@ -31,6 +38,7 @@ final class SleepManager {
     // MARK: - Init
 
     init() {
+        restorePersistedState()
         refreshStatus()
         installWatchdog()
 
@@ -43,7 +51,69 @@ final class SleepManager {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.cleanup()
+            guard let self else { return }
+            if self.userInitiatedQuit {
+                self.cleanup()
+            } else if self.isAwake {
+                // System-initiated termination: touch the marker so the
+                // watchdog grace period is measured from NOW, not from when
+                // awake mode was originally enabled.
+                self.touchMarker()
+            }
+        }
+    }
+
+    // MARK: - State Persistence
+
+    /// Save awake state so Cortisol can restore it after a system-initiated kill.
+    /// If duration is set, persist the absolute expiration time.
+    private func persistAwakeState(remainingSeconds: Int? = nil) {
+        UserDefaults.standard.set(true, forKey: Self.persistedAwakeKey)
+        if let remaining = remainingSeconds, remaining > 0 {
+            let expiration = Date().addingTimeInterval(TimeInterval(remaining)).timeIntervalSince1970
+            UserDefaults.standard.set(expiration, forKey: Self.persistedExpirationKey)
+        } else {
+            // Indefinite — clear any previous expiration
+            UserDefaults.standard.removeObject(forKey: Self.persistedExpirationKey)
+        }
+    }
+
+    private func clearPersistedState() {
+        UserDefaults.standard.removeObject(forKey: Self.persistedAwakeKey)
+        UserDefaults.standard.removeObject(forKey: Self.persistedExpirationKey)
+    }
+
+    /// On launch, if we were previously awake (persisted) AND the marker file
+    /// still exists (watchdog hasn't cleaned up), re-enable immediately.
+    private func restorePersistedState() {
+        guard UserDefaults.standard.bool(forKey: Self.persistedAwakeKey) else { return }
+
+        // If the watchdog already restored sleep and removed the marker,
+        // don't fight it — clear persisted state and stay off.
+        guard FileManager.default.fileExists(atPath: Self.markerPath) else {
+            clearPersistedState()
+            return
+        }
+
+        // Re-enable sleep prevention — we were killed while awake
+        guard runPmset(disableSleep: true) else {
+            clearPersistedState()
+            return
+        }
+
+        isAwake = true
+        createMarker()
+
+        // Restore timed session if an expiration was persisted
+        let expiration = UserDefaults.standard.double(forKey: Self.persistedExpirationKey)
+        if expiration > 0 {
+            let remaining = Int(expiration - Date().timeIntervalSince1970)
+            if remaining > 0 {
+                enableCountdown(seconds: remaining)
+            } else {
+                // Timer already expired while we were dead — disable
+                disableAwake()
+            }
         }
     }
 
@@ -81,22 +151,28 @@ final class SleepManager {
         guard runPmset(disableSleep: true) else { return }
         isAwake = true
         createMarker()
+        persistAwakeState(remainingSeconds: duration)
 
         countdownTimer?.invalidate()
         countdownTimer = nil
 
         if let duration {
-            remainingSeconds = duration
-            countdownTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                if let remaining = self.remainingSeconds, remaining > 1 {
-                    self.remainingSeconds = remaining - 1
-                } else {
-                    self.disableAwake()
-                }
-            }
+            enableCountdown(seconds: duration)
         } else {
             remainingSeconds = nil
+        }
+    }
+
+    private func enableCountdown(seconds: Int) {
+        remainingSeconds = seconds
+        countdownTimer?.invalidate()
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if let remaining = self.remainingSeconds, remaining > 1 {
+                self.remainingSeconds = remaining - 1
+            } else {
+                self.disableAwake()
+            }
         }
     }
 
@@ -109,6 +185,7 @@ final class SleepManager {
             _ = runPmset(disableSleep: false)
         }
         removeMarker()
+        clearPersistedState()
         refreshStatus()
     }
 
@@ -140,8 +217,10 @@ final class SleepManager {
 
             if isAwake && !wasAwake {
                 createMarker()
+                persistAwakeState()
             } else if !isAwake && wasAwake {
                 removeMarker()
+                clearPersistedState()
                 countdownTimer?.invalidate()
                 countdownTimer = nil
                 remainingSeconds = nil
@@ -167,7 +246,17 @@ final class SleepManager {
         activeInterfaces = getActiveInterfaces()
     }
 
+    /// Call this only from the explicit "Quit Cortisol" menu action.
+    func userQuit() {
+        userInitiatedQuit = true
+        cleanup()
+        NSApplication.shared.terminate(nil)
+    }
+
     func cleanup() {
+        guard !didCleanup else { return }
+        didCleanup = true
+
         countdownTimer?.invalidate()
         pollTimer?.invalidate()
         countdownTimer = nil
@@ -178,6 +267,7 @@ final class SleepManager {
             isAwake = false
         }
         removeMarker()
+        clearPersistedState()
     }
 
     // MARK: - Sudoers Setup (one-time, with Touch ID)
@@ -260,6 +350,15 @@ final class SleepManager {
         FileManager.default.createFile(atPath: Self.markerPath, contents: nil)
     }
 
+    /// Update the marker's mtime to now without recreating it.
+    private func touchMarker() {
+        let url = URL(fileURLWithPath: Self.markerPath)
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()],
+            ofItemAtPath: url.path
+        )
+    }
+
     private func removeMarker() {
         try? FileManager.default.removeItem(atPath: Self.markerPath)
     }
@@ -267,11 +366,19 @@ final class SleepManager {
     // MARK: - Watchdog LaunchAgent
 
     func installWatchdog() {
-        // Watchdog tries sudo -n first (silent), falls back to dialog
+        // Watchdog checks marker age: if Cortisol has been dead less than 5
+        // minutes, skip — it may be relaunching after a system-initiated kill.
+        // The marker mtime is refreshed on system termination so the grace
+        // period is measured from when Cortisol was killed, not when awake
+        // mode was first enabled.
         let inlineScript = [
             "[ ! -f /tmp/cortisol-awake ] && exit 0;",
             "pgrep -x cortisol >/dev/null 2>&1 && exit 0;",
             "pmset -g 2>/dev/null | grep -q 'SleepDisabled.*1' || { rm -f /tmp/cortisol-awake; exit 0; };",
+            // Grace period: check marker mod time. If modified less than 300s ago,
+            // Cortisol may be relaunching — give it time.
+            "AGE=$(( $(date +%s) - $(stat -f %m /tmp/cortisol-awake) ));",
+            "[ \"$AGE\" -lt 300 ] && exit 0;",
             "sudo -n pmset -a disablesleep 0 2>/dev/null && rm -f /tmp/cortisol-awake && exit 0;",
             "osascript",
             "-e 'display dialog \"Cortisol was terminated but your Mac is still prevented from sleeping.\" & return & return & \"Click Restore to re-enable normal sleep behavior.\" buttons {\"Ignore\", \"Restore Sleep\"} default button \"Restore Sleep\" with title \"Cortisol Watchdog\" with icon caution'",
